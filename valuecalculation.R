@@ -1,17 +1,30 @@
 library(dplyr)
 library(ggplot2)
 library(broom)
+library(writexl)
 
-SalesPriceFAOSTAT2022 <- read_csv("SalesPriceFAOSTAT2022.csv")
-StocksFAOSTAT2022 <- read_csv("StocksFAOSTAT2022.csv")
-ProductionVolumeFAOSTAT2022V2 <- read_excel("ProductionVolumeFAOSTAT2022V2.xlsx")
-ProductionAmountFAOSTAT2022 <- read_delim("ProductionAmountFAOSTAT2022.csv", 
-                                            +     delim = "\t", escape_double = FALSE, 
-                                            +     trim_ws = TRUE)
-ProductionPriceFAOSTAT2022 <- read_csv("ProductionPriceFAOSTAT2022.csv")
+#Load stock data from Supplementary material 1 and ensuring that the relevant column is numeric.
+StocksFAOSTAT2022 <- read_excel("Supplementary Material 1..xlsx", sheet = "Stocks")
+StocksFAOSTAT2022$Value <- as.numeric(StocksFAOSTAT2022$Value)
 
-# Selecting the necessary columns from ProductionVolumeFAOSTAT2022V2
-volume_df <- ProductionVolumeFAOSTAT2022V2 %>%
+ProductionVolumeFAOSTAT2022 <-read_excel("Supplementary Material 1..xlsx", sheet = "ProductionVolume")
+ProductionVolumeFAOSTAT2022$Value <- as.numeric(ProductionVolumeFAOSTAT2022$Value)
+
+
+ProductionQuantityFAOSTAT2022 <-read_excel("Supplementary Material 1..xlsx", sheet = "ProductionQuantity")
+ProductionQuantityFAOSTAT2022$Value <- as.numeric(ProductionQuantityFAOSTAT2022$Value)
+
+
+ProducerPriceFAOSTAT2022 <-read_excel("Supplementary Material 1..xlsx", sheet = "ProducerPrice")
+ProducerPriceFAOSTAT2022$Value <- as.numeric(ProducerPriceFAOSTAT2022$Value)
+
+# As a sanity check the FAO data and calculated values were compared to the official national statistics provided by the Natural Resources Institute Finland.
+# Finland was selected for the comparison as they provide official reports on the values calculated from FAOSTAT below and have data registered in FAOSTAT.
+# https://www.luke.fi/en/statistics/meat-production/meat-production-2022
+# https://www.luke.fi/en/statistics/producer-prices-of-agricultural-and-horticultural-products/producer-prices-of-agricultural-products-52022-provisional)
+
+# This selects the necessary columns from ProductionVolumeFAOSTAT2022 (reported production of each item in tonnes) and adds the specie as a new column.
+volume_df <- ProductionVolumeFAOSTAT2022 %>%
   mutate(Specie = if_else(Item == "Hen eggs in shell, fresh", "Chickens", "" )) %>%
   mutate(Specie = if_else(Item == "Meat of chickens, fresh or chilled", "Chickens", Specie )) %>%
   mutate(Specie = if_else(Item == "Raw milk of cattle", "Cattle", Specie )) %>%
@@ -24,12 +37,13 @@ volume_df <- ProductionVolumeFAOSTAT2022V2 %>%
   select(Area, Item, Specie, Value, Unit) %>%
   rename(`Production` = Value)
 
-# Renaming the 'Value' column from ProductionPriceFAOSTAT2022 to 'USD/tonne'
-price_df <- ProductionPriceFAOSTAT2022 %>%
+# Creates a Producer price data frame from FAOSTAT data and name the value column 'USD/tonne'
+price_df <- ProducerPriceFAOSTAT2022 %>%
   select(Area, Item, Value) %>%
   rename(`USD/tonne` = Value)
 
-# Merging the dataframes on common keys (Area, Item)
+# Merges the production volume  the dataframes on the common keys Area (country) and Item (the registered product)
+# Eggs can be reported in both the number of eggs and the total weight, rows with the number of eggs are removed.
 volume_price_df <- volume_df %>%
   inner_join(price_df, by = c("Area", "Item")) %>%
   # Remove rows where Unit is "1000 No"
@@ -37,23 +51,23 @@ volume_price_df <- volume_df %>%
   # Create the new column ValueUSD
   mutate(ValueUSD = Production * `USD/tonne`)
 
-# Select the necessary columns from ProductionAmountFAOSTAT2022 and adjust the values
-producing_animals_df <- ProductionAmountFAOSTAT2022 %>%
+# Selects the necessary columns from ProductionQuantityFAOSTAT2022 to report the number of animals used in production in each country.
+producing_animals_df <- ProductionQuantityFAOSTAT2022 %>%
   select(Area, Item, Unit, Value) %>%
   mutate(Value = if_else(Unit == "1000 An", Value * 1000, Value)) %>%
   mutate(Unit = if_else(Unit == "1000 An", "An", Unit)) %>%
   rename(ProducingAnimals = Value) %>%
   filter(ProducingAnimals != 0)
 
-# Merge with the volume_price_df on common keys (Area, Item)
+# Creates a new data frame containing the Production volume (in tonnes), the price (in USD per tonne) and the number of animals involved in production.
 volume_price_producing_df <- volume_price_df %>%
   inner_join(producing_animals_df %>% select(Area, Item, ProducingAnimals), by = c("Area", "Item"))
 
-# Create a new column ValuePerHead
+# Creates a new column where the value per animal involved in production is calculated.
 volume_price_producing_value_df <- volume_price_producing_df %>%
   mutate(ValuePerHead = ValueUSD / ProducingAnimals)
 
-# Create a new dataframe for animal stocks in each country. 
+# Creates a new dataframe for the total number of animals per specie in each country.
 stock_df <- StocksFAOSTAT2022 %>%
   select(Area, Item, Unit, Value) %>%
   mutate(Value = if_else(Unit == "1000 An", Value * 1000, Value)) %>%
@@ -61,48 +75,62 @@ stock_df <- StocksFAOSTAT2022 %>%
   rename(Stock = Value) %>%
   rename(Specie = Item)
 
-# Add stock volumn to the main dataframe
+# Adds the number of animals per species to create a new dataframe
 volume_price_producing_value_stock_df <- volume_price_producing_value_df %>%
   inner_join(stock_df %>% select(Area, Specie, Stock), by = c("Area", "Specie"))
   
-# Add stock volumn to the main dataframe
-volume_price_producing_value_stock_df <- volume_price_producing_value_df %>%
-  inner_join(stock_df %>% select(Area, Specie, Stock), by = c("Area", "Specie"))
-
-# Add stock volumn to the main dataframe
+# This statement calculates a cullrate based on the number of animals slaughtered each year. 
+# This value becomes highly misleading for species where a significant amount of animals is used for non-meat purposes.
 volume_price_producing_value_stock_cullrate_df <- volume_price_producing_value_stock_df %>%
   mutate(Cullrate = ProducingAnimals/Stock)
 
 # Summarisation of data to get an overview of the dataset.
 summary <- volume_price_producing_value_stock_cullrate_df %>%
   group_by(Item) %>%
-  summarise(Cullrate = median(Cullrate), ValuePerHead = median(ValuePerHead), LifeExpectancy = 1/Cullrate, NrAnimals= sum(Production), NrCountries = n_distinct(Area))
+  summarise(ValuePerHead = median(ValuePerHead), Cullrate = median(Cullrate), LifeExpectancy = 1/Cullrate, NrAnimals= sum(Production), NrCountries = n_distinct(Area))
 
-grouped <- volume_price_producing_value_stock_cullrate_df %>%
+summary_mean <- volume_price_producing_value_stock_cullrate_df %>%
   group_by(Item) %>%
-  summarize(ValuePerHead = mean(ValuePerHead, na.rm = TRUE))
+  summarise(ValuePerHead = mean(ValuePerHead, na.rm = TRUE))
 
 
-# Output 1, box plot of value per head and item calculated on the entire FAOSTAT dataset.
+# Output 1 (depreciated in favour of output 5 for the published paper), A box plot of value per head and item calculated on the entire FAOSTAT dataset.
 
-# Create the box plot
-ggplot(volume_price_producing_value_stock_cullrate_df, aes(x = Item, y = ValuePerHead, fill = Item)) +
+# Creates the box plot
+figure1 <- ggplot(volume_price_producing_value_stock_cullrate_df, aes(x = Item, y = ValuePerHead, fill = Item)) +
   geom_boxplot() +
   labs(title = "Value Per Head by Item", x = "Item", y = "Annual Value Per Head (USD)") +
   theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1), 
+    legend.position = "none", 
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  ) +
   ylim(0, 5000)
-  theme(legend.position = "none")  # Optionally, remove the legend as the fill colors correspond to the same items on the x-axis
+
   
-# Output 2, a summary of stats calculated on the entire FAOSTAT dataset.
+# Saves the plot as a PNG file with 600 DPI
+#  ggsave("OldFigure1.png", plot = figure1, dpi = 600, width = 8, height = 6, units = "in")  
+  
+# Output 2 (table 1 in the article), a summary of stats calculated on the entire FAOSTAT dataset.
 
  value_stock_countries_summary <-  volume_price_producing_value_stock_cullrate_df %>%
    group_by(Item) %>%
    summarise(USDPerHead = median(ValuePerHead), Sd = sd(ValuePerHead, na.rm = TRUE), NrAnimals= sum(ProducingAnimals), NrCountries = n_distinct(Area))
 
- write.csv2(value_stock_countries_summary, file = "Table 1, value_per_head.csv") 
+ # Modify column names and write values in a suitable table
+ value_stock_countries_summary_table <- value_stock_countries_summary %>%
+   mutate(
+     `USD per head` = round(USDPerHead, 1),  # Format USDPerHead to one decimal
+     SD = round(Sd, 1),  # Format SD to one decimal
+     `NrAnimals (million)` = round(NrAnimals / 1000000, 1)  # Scale NrAnimals and rename
+   ) %>%
+   select(`Item`, `USD per head`, `SD`, `NrAnimals (million)`, `NrCountries`)  # Select columns with adjusted names
+ 
+ write_xlsx(value_stock_countries_summary_table, path = "Table 1, value_per_head.xlsx")
 
-# Output 3 (table2), a summary of stats calculated on data from countries inside the internal EU market. 
+# Output 3 (table2 in the article), a summary of stats calculated on data from countries inside the internal EU market. 
 
     #The below codes rerun the final part of the experiment but using only data from EU countries
   eu_countries <- c("Austria", "Belgium", "Bulgaria", "Croatia", "Cyprus", "Czech Republic", "Denmark", 
@@ -117,13 +145,41 @@ ggplot(volume_price_producing_value_stock_cullrate_df, aes(x = Item, y = ValuePe
   volume_price_producing_value_stock_cullrate_nonEU_df <- volume_price_producing_value_stock_cullrate_df %>%
     filter(!Area %in% eu_countries)
   
-value_stock_countries_summary_EU <-  volume_price_producing_value_stock_cullrate_EU_df %>%
+  value_stock_countries_summary_EU <-  volume_price_producing_value_stock_cullrate_EU_df %>%
     group_by(Item) %>%
-    summarise(USDperHead = median(ValuePerHead), StandardDeviation = sd(ValuePerHead, na.rm = TRUE), NrAnimals= sum(ProducingAnimals), NrCountries = n_distinct(Area))
+    summarise(USDPerHead = median(ValuePerHead), Sd = sd(ValuePerHead, na.rm = TRUE), NrAnimals= sum(ProducingAnimals), NrCountries = n_distinct(Area))
+  
+  # Modify column names and write values in a suitable table
+  value_stock_countries_summary_EU_table <- value_stock_countries_summary_EU %>%
+    mutate(
+      `USD per head` = round(USDPerHead, 1),  # Format USDPerHead to one decimal
+      SD = round(Sd, 1),  # Format SD to one decimal
+      `NrAnimals (million)` = round(NrAnimals / 1000000, 1)  # Scale NrAnimals and rename
+    ) %>%
+    select(`Item`, `USD per head`, `SD`, `NrAnimals (million)`, `NrCountries`)  # Select columns with adjusted names
 
-write.csv2(value_stock_countries_summary_EU, file = "Table 2, value_per_head_EU.csv")
+write_xlsx(value_stock_countries_summary_EU_table, path = "Table 2, value_per_head_EU.xlsx")
 
-# Output 4 (not used), Box plot of value per head calculated on European countries in the dataset
+
+# Output 4 (not used in article), A box plot of value per head calculated on European countries in the dataset. As expected variance is much smaller.
+
+# Creates the box plot
+figureX <- ggplot(volume_price_producing_value_stock_cullrate_EU_df, aes(x = Item, y = ValuePerHead, fill = Item)) +
+  geom_boxplot() +
+  labs(title = "Value Per Head by Item", x = "Item", y = "Annual Value Per Head (USD)") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1), 
+    legend.position = "none", 
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  ) +
+  ylim(0, 5000)
+
+
+# Saves the plot as a PNG file with 600 DPI
+#ggsave("figureX.png", plot = figureX, dpi = 600, width = 8, height = 6, units = "in")  
+
   ggplot(volume_price_producing_value_stock_cullrate_EU_df, aes(x = Item, y = ValuePerHead, fill = Item)) +
     geom_boxplot() +
     labs(title = "Value Per Head by Item", x = "Item", y = "Annual Value Per Head (USD), EU Countries only") +
@@ -131,7 +187,7 @@ write.csv2(value_stock_countries_summary_EU, file = "Table 2, value_per_head_EU.
     theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
     ylim(0, 5000)
   
-  # Combine dataframes with a new column indicating EU status
+  # Combines dataframes with a new column indicating EU status
   combined_df <- bind_rows(
     volume_price_producing_value_stock_cullrate_EU_df %>%
       mutate(EU = TRUE),
@@ -139,32 +195,53 @@ write.csv2(value_stock_countries_summary_EU, file = "Table 2, value_per_head_EU.
       mutate(EU = FALSE)
   )
   
-  #Output 5 (not), comparison of distribution between markets inside and outside the EU internal market.
-  
+  #Output 5 (figure 1), comparison of value per head between markets inside and outside the EU internal market.
+ 
   # Perform t-tests grouped by 'Item' on 'ValuePerHead' and organize results
   ttest_ValueperHead <- combined_df %>%
     group_by(Item) %>%
-    do(
-      tidy(
-        t.test(
-          ValuePerHead ~ EU, 
-          data = .
-        )
-      )
-    )
+    do(tidy(t.test(ValuePerHead ~ EU, data = .)))
   
   # Display the resulting t-test results
   print(ttest_ValueperHead)
+
+  # Modify EU column to factor with descriptive levels
+  combined_df$EU <- factor(combined_df$EU, levels = c(FALSE, TRUE), labels = c("All Countries", "EU Members"))
   
-  # Create violin plots for ValuePerHead by Item and EU status
+  # Shorten names to make the facets look better.
+ combined_df <- combined_df %>%
+    mutate(Item = if_else(Item == "Meat of chickens, fresh or chilled", "Meat of chickens", Item )) %>%
+    mutate(Item = if_else(Item == "Meat of cattle with the bone, fresh or chilled", "Meat of cattle", Item )) %>%
+    mutate(Item = if_else(Item == "Meat of goat, fresh or chilled", "Meat of goat", Item )) %>%
+    mutate(Item = if_else(Item == "Meat of sheep, fresh or chilled", "Meat of sheep", Item )) %>%
+    mutate(Item = if_else(Item == "Meat of pig with the bone, fresh or chilled", "Meat of pig", Item ))
+  
+  # Creates violin plots for ValuePerHead by Item and EU status with customized colors and legend
   violin_plot <- ggplot(combined_df, aes(x = EU, y = ValuePerHead, fill = EU)) +
     geom_violin(trim = FALSE) +
     facet_wrap(~ Item, scales = "free") +
     theme_minimal() +
-    labs(title = "Distribution of ValuePerHead by Item and EU Status",
-         x = "EU Status",
-         y = "ValuePerHead") +
+    labs(
+      title = "Distribution of Value Per Head by Item produced and EU Status",
+      x = "EU Status",
+      y = "Value Per Head",
+      fill = "Membership"
+    ) +
+    scale_fill_manual(
+      values = c("All Countries" = rgb(73, 173, 196, maxColorValue = 255), 
+                 "EU Members" = rgb(255, 165, 0, maxColorValue = 255)), # Orange color for EU members
+      labels = c("All Countries", "EU Members")
+    ) +
+    theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background = element_rect(fill = "white", color = NA),
+      strip.text = element_text(
+        size = 10, face = "bold", color = "black", hjust = 0.5, margin = margin(t = 12),
+        # Allow multiline text
+        vjust = 0.5, lineheight = 0.9
+      ) +
+      facet_wrap(~ grp, labeller = label_wrap_gen(width=10))
+    )
   
-  print(violin_plot)
-  
-  
+  # Save the plot as a PNG file with 600 DPI
+  ggsave("figure1.png", plot = violin_plot, dpi = 600, width = 8, height = 6, units = "in")
