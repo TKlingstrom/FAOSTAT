@@ -1,7 +1,11 @@
+#Note that you may need to install the packages below prior to loading them in the library. 
 library(dplyr)
 library(ggplot2)
 library(broom)
 library(writexl)
+library(readxl)
+
+#If this code is cloned from the Github repository the Supplementary material 1 xlsx file is located in the working directoy and ready to read.
 
 #Load stock data from Supplementary material 1 and ensuring that the relevant column is numeric.
 StocksFAOSTAT2022 <- read_excel("Supplementary Material 1..xlsx", sheet = "Stocks")
